@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.pyc
+
+# LaTeX build products
+*.aux
+*.log
+*.out
+*.synctex.gz
+
+# run artifacts (regenerable; python/README.md is the record)
+python/runs/
