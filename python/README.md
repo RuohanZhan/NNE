@@ -1,264 +1,154 @@
 # Python port of the nuisance-NNE code
 
-Port of `code_max_July28_2026` (MATLAB, in the Dropbox research folder) to PyTorch + NumPy, so the
-experiments can be run on a machine without MATLAB.
+PyTorch + NumPy port of `code_max_July28_2026` (MATLAB, in the Dropbox research folder), so the
+experiments run on a machine without MATLAB. **July28 only** — July20 differs in six ways at once
+(length-scale prior, `alpha` intercept, two demeaning changes, GP jitter, network width/batch), so a
+July20 rerun would be uninterpretable. Its one ingredient that matters, the lognormal length-scale
+prior, was already a commented one-line toggle in July28's `gaussian_process.m` and is here as
+`--prior lognormal`.
 
-## Scope
+Measured results live in [`RESULTS.md`](RESULTS.md).
 
-**July28 only.** July20 differs in six ways at once (length-scale prior, `alpha` intercept, two
-demeaning changes, GP jitter, network width/batch), so a July20 rerun would be uninterpretable. The
-one July20 ingredient that matters — the lognormal length-scale prior — was already a commented
-one-line toggle in July28's `gaussian_process.m` and is here as `--prior lognormal`.
+## Files
 
-**`crude_estimator.m` is not ported.** It is the only file needing scikit-learn, which is not in
-`~/myenv`, and nothing depends on it: `nne_gen` runs with `g_hat = 0`. Add it if the `ĝ`-centering
-experiment gets picked up — `TreeBagger(200, ..., 'reg', oobPrediction='on')` maps to
-`RandomForestRegressor(n_estimators=200, oob_score=True).oob_prediction_`, and `regress(y, t)` is OLS
-without an intercept.
+Five modules: two libraries (`dgp.py`, `nne.py`) and three command-line entry points (`run.py`,
+`analysis.py`, `benchmarks.py`).
 
-## Nothing reproduces bit-for-bit
-
-MATLAB's `threefry` streams and the `Substream` arithmetic in `nne_gen.m` have no NumPy equivalent.
-Results match the MATLAB pipeline distributionally only. `data.mat` was never shared, so `X` and `y`
-were being regenerated regardless — every reported bias figure is a fresh draw, with MC standard
-error ≈ 0.089/√num_repeat (≈ 0.004 at 500 replications).
-
-Correctness is judged structurally — shapes, loss algebra, prior tail probabilities, GP covariance —
-and by whether the bias ordering across `M` reappears, not by hitting 0.017.
-
-## Layout
-
-| file | MATLAB source |
+| Python | MATLAB (`code_max_July28_2026`) |
 |---|---|
-| `dgp.py` | `monte_carlo_data.m`, `partial_linear_model.m`, `gaussian_process.m` |
-| `nne.py` | `nne_gen.m`, `nne_train.m`, `learn.m` |
-| `run.py` | `monte_carlo.m` + CLI |
+| `dgp.py` — `make_data` | `monte_carlo_data.m` |
+| `dgp.py` — `partial_linear_model` | `partial_linear_model.m` |
+| `dgp.py` — `gp_draw` | `gaussian_process.m` |
+| `nne.py` — `generate` | `nne_gen.m` (its local `generate`) |
+| `nne.py` — `NNENet`, `glorot` | `nne_train.m` (the layer graph) |
+| `nne.py` — `learn`, `grouped_mse` | `learn.m` (and its local `loss_fcn`, `grouped_mse`) |
+| `nne.py` — `var_from_logs2`, `NNENet.var_head` | *no analogue — added here* |
+| `run.py` — `gen-data` | `monte_carlo_data.m` as a driver |
+| `run.py` — `train` | `nne_gen.m` + `nne_train.m` |
+| `run.py` — `mc` | `monte_carlo.m` |
+| `run.py` — `checks` | *no analogue — port verification only* |
+| `benchmarks.py` — `crude_once` | `crude_estimator.m` |
+| `benchmarks.py` — `dml_once`, `cmd_smoke` | *no July28 analogue* (Aug9 adds `dml_estimator.m`, `boosting.m`) |
+| `analysis.py` | *no analogue — diagnostics added here* |
 
-Artifacts land in `runs/<tag>/` (`data.npz`, `trained.pt`, `mc.npz`), replacing `data.mat`,
-`trained_nne.mat`, `mc_result.mat`.
+**`dgp.py`** — the data-generating process. `make_data` builds the one fixed design: AR(0.7)
+covariance on `Z`, `t = z₁ + 0.25·logistic(z₃) + s1·noise`, `g₀ = logistic(z₁) + 0.25·z₃`, both `X`
+and `g₀` column-demeaned. It also returns `t_tilde`, the demeaned treatment shock, which is the
+efficient-score direction and sets the semiparametric bound `1/‖t̃‖`. `gp_draw` is one draw from the
+GP prior over `g`; where MATLAB's `chol` may succeed, `np.linalg.cholesky` can fail on a near-rank-one
+kernel, so the port retries with jitter ×10 up to three times and reports how often it had to.
+
+**`nne.py`** — everything the estimator needs. `generate` produces `L` examples in `L/M` groups
+sharing one `β` draw and one `g` draw; `NNENet` is the DeepSets architecture; `learn` is the training
+loop with Adam, a warmup-plus-cosine step schedule, and an EMA shadow net, which is the net that gets
+returned and evaluated. The `var_from_logs2` / `var_head` pair is the inference addition with no
+MATLAB counterpart. In MATLAB, `nne_gen.m` and `nne_train.m` are two scripts that must run
+back-to-back in one workspace; here `run.py train` fuses them into one command.
+
+**`run.py`** — the only entry point that trains, and the only one that writes `data.npz` and
+`trained.pt`. Also exports `RUNS` and `device_of()`, which the other two CLIs import.
+
+**`analysis.py`** — diagnostics off an existing run: prior-averaged bias, the eigenspectrum of the
+GP kernel against the treatment direction, the net's `∂β̂/∂y` against the efficient representer, and
+the oracle/naive OLS floors. Read-only.
+
+**`benchmarks.py`** — external comparisons: cross-fitted DML via `doubleml`, and the coauthor's
+non-orthogonal backfitting estimator. Read-only. The forest is pinned to MATLAB's `TreeBagger`
+defaults so that DML and `crude_once` share a learner and the comparison isolates orthogonality.
 
 ## Running
 
 ```sh
 source ~/myenv/bin/activate
-python run.py checks                     # standalone verification, no training
-python run.py gen-data
-python run.py train --M 16
-python run.py mc
+python run.py checks                     # port verification; no data, no training
+python run.py --tag base gen-data        # -> runs/base/data.npz
+python run.py --tag base train --M 16    # -> runs/base/trained.pt   (~12 min on MPS)
+python run.py --tag base mc              # -> runs/base/mc_beta0.5.npz
 ```
 
-Flags default to the July28 values: `--M --lam --prior --width --n --beta0 --s1 --seed --num-iter
---train-L --num-repeat --tag`.
+`--tag` is a **top-level** flag on all three CLIs, so it goes *before* the subcommand. It defaults to
+`base`, so it can be omitted for the sequence above. Generation takes ~42 s and training ~34 ms/iter,
+so 2×10⁴ iterations is ~12 min on MPS.
 
-Note `train.L = 1e4·M` scales the *dataset* with `M` while holding *groups* at 10⁴, so the M-sweep is
-not at a fixed budget. `--train-L` overrides this to hold it fixed.
+### `run.py`
 
-## First result (superseded — kept for the timings)
+| subcommand | flags (defaults) |
+|---|---|
+| `gen-data` | `--n 500 --d 20 --beta0 0.5 --s1 0.5 --seed 0` |
+| `train` | `--M 16 --lam --prior halfnormal --width 64 --train-L --num-iter 20000 --B 256 --max-step 0.003 --seed 1 --init-seed --data-tag --var-mode none --var-weight 0.02` |
+| `mc` | `--num-repeat 10000 --beta0 --seed 2 --data-tag` |
+| `checks` | none |
 
-`M=16`, half-normal, `n=500`, `β₀=0.5`, 500 replications, 2e4 iterations — the July28 default
-configuration. Training takes ~12 min on MPS (~34 ms/iter), generation ~42s.
+`--lam` unset reproduces the MATLAB loss verbatim. `--train-L` unset means `10000·M`, which scales
+the dataset with `M` while holding groups at 10⁴ — so an M-sweep is *not* at a fixed budget unless
+`--train-L` is set explicitly. `--beta0` on `mc` defaults to whatever `data.npz` recorded; passing it
+evaluates a trained net at a different `β₀` without retraining. `--var-mode` other than `none`
+attaches the variance head and requires `M ≥ 2`.
 
-The single run gave bias +0.0217, sd 0.0884. The settled figures are the six-seed study at 10⁴
-replications: bias **+0.0196 ± 0.0024** (sd across training seeds), sd(β̂) **0.0896**. The apparent
-0.0217-vs-0.017 gap against MATLAB was an artifact of comparing single training runs while quoting
-only Monte Carlo error (0.0009 against a true 0.0024); it is resolved, not outstanding.
+### `analysis.py`
 
-One further correction this section used to carry: sd 0.0884 does **not** match a `2/√n = 0.0894` bound —
-the efficiency bound is conditional on this `X`, `1/‖t̃‖ = 0.0849`, so the achieved 0.0896 is ~6%
-above it rather than at it.
+| subcommand | flags (defaults) |
+|---|---|
+| `prior-bias` | none |
+| `eigen` | `--draws 200` |
+| `representer` | none |
+| `oracle` | `--num-repeat 10000 --beta0 --seed 2` |
 
-## Benchmarks: cross-fitted DML
+All four load *both* `data.npz` and `trained.pt` from `--tag`, even `eigen` and `oracle`, which never
+use the checkpoint. There is no `--data-tag` here, so in practice only a tag holding both files works
+— `base`. `representer` builds the net without `var_mode`, so it works only on `var_mode="none"`
+checkpoints.
 
-`python benchmarks.py {smoke,dml,crude}`, using the `doubleml` package (0.10.1) at its defaults —
-`n_folds=5`, `n_rep=1`, `score='partialling out'`. Same fixed `X`, `g_true` and the same 10⁴ `y`
-draws as the NNE Monte Carlo. Efficient sd on this design is `1/‖t̃‖ = 0.0849`.
+### `benchmarks.py`
 
-| estimator | bias | sd | RMSE | sd/eff | coverage |
-|---|---|---|---|---|---|
-| naive OLS | +0.2468 | 0.0378 | 0.2497 | 0.445 | — |
-| crude_estimator (RF, non-orthogonal) | +0.1075 | 0.0515 | 0.1192 | 0.607 | — |
-| DML, depth-5 forest (docs' bonus config) | +0.0636 | 0.0559 | 0.0847 | 0.658 | 0.853 |
-| DML, TreeBagger-matched forest | +0.0398 | 0.0705 | **0.0810** | 0.830 | 0.925 |
-| **NNE M=16** | +0.0196 | 0.0896 | 0.0917 | 1.055 | 0.946 |
-| DML, LassoCV | +0.0049 | 0.0856 | 0.0857 | 1.008 | 0.947 |
-| oracle OLS (`g₀` known) | −0.0002 | 0.0378 | 0.0378 | 0.445 | — |
+`--jobs 8 --num-repeat 10000 --seed 2` are **top-level** here, alongside `--tag` — unlike `run.py`
+and `analysis.py`, where `--num-repeat` and `--seed` sit on the subcommand.
 
-The NNE row is a composite of two sets of runs: bias and sd are the mean over the six no-head runs
-`runs/s1…s6`, coverage is the mean over the three `detached` variance-head runs `runs/va1…va3`
-(0.9463). Same estimator either way — `detached` leaves `β̂` bit-identical, and va1/va3 reproduce
-s1/s3 exactly. The `joint` and all-seven means also round to 0.946, so the printed figure does not by
-itself identify which grouping produced it; `detached` is the one that belongs there.
+| subcommand | flags (defaults) | reads |
+|---|---|---|
+| `smoke` | `--learner lasso` (`lasso`/`rf`/`rf_docs`) | nothing — redraws the canonical `CCDDHNR2018` data, ignores `--tag` |
+| `dml` | `--learner lasso` | `data.npz` |
+| `crude` | none | `data.npz` |
 
-**Orthogonality is worth 63% of the bias, holding the learner fixed.** `crude_estimator` and
-TreeBagger-DML use the identical forest (200 trees, `p/3` features, `min_samples_leaf=5`); the only
-substantive difference is that DML also fits `m̂ = E[D|X]` and partials the treatment out.
-+0.1075 → +0.0398.
+At the same `--seed`, `dml` and `crude` draw the same `y` replications as `run.py mc`, so the
+estimators are compared on identical data.
 
-**But the learner matters more than orthogonality here.** Within DML, swapping the forest for Lasso
-takes +0.0398 → +0.0049. `m₀(x) = x₁ + 0.25·logistic(x₃)` is dominated by a linear term, so a forest
-underfits it and leaves regularisation bias; Lasso is nearly correctly specified. DML is not
-automatically unbiased — it is unbiased when the nuisance estimates converge fast enough.
+### Prerequisites
 
-**Every biased estimator sits below the efficiency bound**, monotonically: the more bias, the lower
-the variance. This is the shrinkage signature, and it is why RMSE and bias rank differently —
-TreeBagger-DML has the best RMSE of any feasible estimator here (0.0810) despite 8× the bias of
-Lasso-DML.
+`gen-data` → `train` → `mc`, in that order. `train` reads `data.npz` from `--data-tag` if given, else
+`--tag`; `mc` reads `trained.pt` from `--tag` and `data.npz` from `--data-tag`. `mc` does not create
+its output directory, so it only runs after `train`. `--data-tag` is how a family of training runs
+shares one design: `runs/base/` holds the only `data.npz`, and the other run directories hold only a
+checkpoint.
 
-**The NNE is dominated by Lasso-DML on both axes**: 4.0× the bias and 1.047× the sd. It also loses on
-RMSE to both DML forests. Two qualifications, in fairness: the NNE is given no hint that `g₀` is
-nearly linear — its GP prior is generic, whereas Lasso implicitly exploits that structure — and the
-NNE removes 91% of the naive bias with no hand-derived orthogonal moment, which is the claim being
-tested. But on this DGP it is not competitive with a well-specified DML.
+`analysis.py` needs both `data.npz` and `trained.pt`. `benchmarks.py dml`/`crude` need only
+`data.npz`, not a trained net.
 
-**Coverage tracks bias, not calibration.** The NNE (0.946) and Lasso-DML (0.947) both reach nominal;
-the forests do not (0.925, 0.853), because their `b/σ` is large. Note the forests' analytical se is
-also *anti*-conservative relative to their realised sd.
+Core dependencies are numpy, scipy, and torch. `benchmarks.py` additionally needs doubleml,
+scikit-learn, and joblib; nothing else imports them.
 
-### Validation
+## Artifacts
 
-- **Canonical `s₁ = 1` DGP** (`make_plr_CCDDHNR2018` defaults, 500 reps, `X` redrawn each time):
-  bias +0.0005 (se 0.0020), sd 0.0436 vs the predicted `1/√500 = 0.0447`, coverage 0.960.
-- **The `s₁` factor checks out from both directions**: Lasso-DML sd is 0.0856 at `s₁=0.5` and 0.0436
-  at `s₁=1`, a ratio of 1.96 against the 2.0 that halving `s₁` implies.
-- The docs' worked example reproduces to within fold-split noise: we get `3.05332/0.045584` against
-  the published `3.02092/0.045379`. Over 20 fold splits on identical data the coefficient spans
-  [3.0004, 3.0510] (sd 0.0130), so both values are ordinary draws; the data fingerprints are
-  identical and only the fold assignment differs between library versions.
+Everything lands in `runs/<tag>/`, replacing MATLAB's `data.mat` and `trained_nne.mat`. `runs/` is
+gitignored — it is regenerable, and the numbers it produced are recorded in `RESULTS.md`.
 
-Caveat on the crude-vs-DML contrast: the learner is matched, but crude also uses out-of-bag rather
-than cross-fitted predictions and iterates ten times. Neither is a plausible mechanism for a bias
-gap of 0.068, so attributing it to orthogonality is safe, but it is not a single-variable comparison.
-
-## Phase 0 diagnostics (no training, all off the M=16 net)
-
-Run with `python analysis.py {prior-bias,eigen,representer,oracle}` and `run.py mc --beta0 <b>`.
-All Monte Carlo at 10⁴ replications, MC se 0.0009.
-
-**Benchmarks.** Oracle OLS with `g_true` known: bias −0.0002, sd 0.0378 (analytic `1/‖t‖` = 0.0382).
-Naive OLS with no adjustment: bias **+0.2468**. So the M=16 NNE's +0.023 removes 91% of the
-confounding bias.
-
-**Conditional-on-X bounds.** `‖t̃‖² = 138.9` on this draw, not the expected `n·s1² = 125`, so the
-semiparametric efficient sd is `1/‖t̃‖ = 0.0849` — **not** the `2/√n = 0.0894` used in the notes.
-Everything here is conditional on `X`, so 0.0849 is the right benchmark, and the measured sd 0.0897
-is 6% above it rather than at it.
-
-**The GP prior is misspecified in shape, not amplitude.** Regressing `g` on the 20 columns of `Z`
-linearly, `g₀` gives R² = 0.9955 — and 0.9953 from `z₁, z₃` alone, so it is 2-sparse in 20 dimensions
-— against a median 0.706 for half-normal draws and 0.302 for lognormal. Over 1000 half-normal draws
-the *maximum* is 0.960 and `P(R² > 0.99) = 0`: the truth is outside the prior's empirical range on
-this axis. Amplitude is fine (sd(g₀) = 0.389 vs median prior 0.429). The kernel's
-`w = |N(0,1)|/√(2d)` puts a lengthscale on all 20 coordinates and nothing induces sparsity, so `g₀`
-is in the GP's support but in a very low-mass region. This is the size of the "no hint that `g₀` is
-nearly linear" handicap against Lasso-DML. It does not contradict the prior-averaged-bias diagnostic
-below — that says `g₀` is typical in *difficulty*, which is a different axis from shape.
-
-**E0.1 — β₀ sweep. Prior shrinkage is ruled out.**
-
-| β₀ | 0.0 | 0.25 | 0.5 | 1.0 | 1.5 | 1.75 | 2.0 |
-|---|---|---|---|---|---|---|---|
-| bias | +0.0267 | +0.0249 | +0.0230 | +0.0220 | +0.0272 | +0.0259 | +0.0149 |
-| sd | 0.0909 | 0.0902 | 0.0897 | 0.0893 | 0.0881 | 0.0864 | 0.0840 |
-
-Shrinkage toward the prior mean 1.0 predicts `bias ≈ c(1−β₀)`: zero at β₀=1.0 and ≈ −0.022 at
-β₀=1.5. Instead the bias is flat and positive across the whole range, including at and above the
-prior mean. The bias is confounding, not shrinkage. The steady decline in `sd` toward β₀=2 and the
-drop in bias at the boundary are the only shrinkage signature, and both are small.
-
-**E0.2 — prior-averaged bias.** Over the 500 held-out prior groups: prior-averaged (signed) bias
-**+0.0001 ± 0.0013**, slope of bias on β **+0.0010** (shrinkage would give a negative slope and a
-zero at β=1 — independent confirmation of E0.1). But the unbiased *mean squared* bias is 0.00034,
-i.e. **RMS conditional bias 0.0185**.
-
-So the signed bias averages to zero over the prior while the conditional-on-`g` bias does not. At
-`g_true` it is 0.023, only 1.24× the RMS — `g_true` is a typical draw, not a badly covered one. This
-refines the diagnosis in `CLAUDE.md`: the grouped loss penalizes squared bias *per group*, so 0.0185
-is exactly the quantity λ should move, and the finding is capacity/optimization, not the prior
-failing to cover `g_true`.
-
-**E0.3 — eigenspectrum. No hard bias floor.** Learnable nuisance space `G` = eigenvectors of `V`
-above the noise level `σ²=1`:
-
-| prior | median dim G | median ‖P_{G⊥}t‖² | implied sd | 10th pct of ‖P_{G⊥}t‖² |
-|---|---|---|---|---|
-| half-normal | 11 | 378.5 | 0.0514 | 137.7 |
-| lognormal | 26 | 391.6 | 0.0505 | 124.7 |
-
-The lognormal makes ~2.4× as many nuisance directions learnable — the rough-function tail — though
-the extra directions overlap `t` little, so the medians are close.
-
-Read the median with care: it is the variance achievable *knowing* the realized `(s, w)`.
-Unbiasedness across the whole prior support is stricter, and the 10th percentile is the relevant
-figure — ≈ 137.7 ≈ `‖t̃‖² = 138.9`, i.e. for the roughest draws the GP prior is effectively
-nonparametric and the requirement collapses to the semiparametric bound, sd ≈ 0.085. Against the
-NNE's current 0.0897, unbiasedness is therefore **affordable** — neither a hard floor nor
-particularly expensive. The estimator is simply not on the frontier.
-
-**E0.4 — representer read-out.** `corr(∂β̂/∂y, t̃) = 0.8205` at M=16 — the baseline for the M-sweep,
-where this should rise with M. `‖∂β̂/∂y‖ = 0.0918` against `‖t̃‖/‖t̃‖² = 0.0849`, 8% larger,
-consistent with the 6% variance excess. `Σ(∂β̂/∂y · t) = 0.9878`: the net's gain in the β direction
-is within 1.2% of unity, so multiplicative shrinkage explains at most −0.006 of bias at β₀=0.5 and
-cannot account for the observed +0.023 — again consistent with E0.1.
-
-## Variance head for inference
-
-Outputs `σ̂` alongside `β̂` so a single dataset yields `β̂ ± z·σ̂`, and realized coverage is measured
-rather than inferred from a bias/σ ratio. Built and validated; results at the end of this section.
-
-**The label is free.** Within group ℓ the `M` datasets share `(β_ℓ, g_ℓ)` and differ only in `ε`, so
-the sample variance across the group,
-
-```
-s²_ℓ = (1/(M-1)) Σ_m (β̂_{ℓ,m} − β̄_ℓ)²
-```
-
-is unbiased for `v_ℓ = Var(β̂ | β_ℓ, g_ℓ)`. This is the same `var_grp` already computed and commented
-out at `learn.m:123`; nothing extra is simulated. Regressing a second head on it converges to
-`E[v_ℓ | D]`. Requires `M ≥ 2` — undefined at `M=1`.
-
-**Design decisions, as built** (`--var-mode {none,detached,joint,joint_target}`, `nne.py:149-159`):
-
-- *The variance head reads a detached trunk feature.* Its gradients must not reach the shared body,
-  or `β̂` changes and the reproduced bias is no longer comparable. With the detach the head is a
-  strict add-on and `β̂` is bit-identical. `joint` relaxes this and buys nothing measurable.
-- *Predict `log s²` with a linear output* — the reverse of what this section originally planned.
-  Predicting `v` directly through `softplus` with a scale-normalised MSE does not train: network
-  outputs start near-constant, so `s²` starts near zero, and dividing the residual by that scale
-  sends the gradient through `1/s⁴`. One such spike loads Adam's second moment (half-life ~700 steps)
-  while the first moment (~7 steps) decays back, so the effective step goes to zero and the head never
-  leaves its initial value — measured 72× off. The climb of `s²` during training re-fires the spike,
-  so there is no recovery window. On the log scale no normaliser is needed, the gradient is linear in
-  the log-residual, and `clamp_min(1e-12)` bounds the worst case at init.
-- *Converting back needs the χ² offset.* `s² ~ v·χ²_k/k` with `k = M−1`, so
-  `v̂ = exp(log s²ˆ + log(k/2) − ψ(k/2))` (`nne.var_from_logs2`). This corrects the sampling noise in
-  `s²`, not posterior spread in `v`, so `exp(E[log v])` remains a geometric mean — not binding here.
-- *The `s²` target is detached* and recomputed per batch from the current β head. `joint_target`
-  connects it as a control and did not misbehave; see the tex for why the predicted collapse is not a
-  direction gradient descent travels.
-- *`var_weight = 0.02`* on the head's loss.
-
-**What this does and does not deliver.** It is a *sampling-variance* interval: it captures `v`, not
-the bias `b`. Coverage still degrades as `b/σ` grows, and that is not something the head can detect —
-estimating `b` is precisely what is unavailable. So it measures the coverage shortfall rather than
-fixing it; `M`/`λ` remain the only handle on bias.
-
-**Results.** Seven runs at 10⁴ replications, tabulated in `theory/nne_reproduction.tex` §"Inference
-results". The three `detached` seeds (`runs/va1…va3`):
-
-| | bias | RMSE | sd(β̂) | mean σ̂ | mean v̂ | coverage |
-|---|---|---|---|---|---|---|
-| mean | +0.0201 | 0.0921 | 0.0899 | 0.0915 | 0.008370 | 0.9463 |
-| sd across seeds | 0.0035 | 0.0004 | 0.0004 | 0.0012 | 0.000224 | 0.0050 |
-
-σ̂/sd = 1.018, or 1.037 on the variance scale — 2–4% conservative. Coverage's seed sd (0.0050) exceeds
-the MC standard error (0.0023), so the 0.942–0.952 spread is training-seed variation in bias, not MC
-noise. Per-dataset discrimination is weak: across the 500 held-out prior groups σ̂ spans 2–4% with
-correlation ≈0.10 to the true group variance. Across MC replications σ̂ is near-constant *by
-construction* — `X`, `g₀`, `β₀` are fixed there, so a constant σ̂ is the correct answer.
+| file | written by | holds |
+|---|---|---|
+| `data.npz` | `run.py gen-data` | `X, y, g_true, t_tilde, beta0` |
+| `trained.pt` | `run.py train` | `state_dict` plus the run's `M, width, prior, lam, train_L, var_mode, seed` and the train/test predictions and labels |
+| `mc_beta<beta0>.npz` | `run.py mc` | `par, beta0, bias, rmse, sd`, plus `sigma, coverage` with a variance head |
+| `bench_dml_<learner>.npz` | `benchmarks.py dml` | `par, se, bias, sd, rmse, coverage` |
+| `bench_crude.npz` | `benchmarks.py crude` | `par, bias, sd, rmse` |
 
 ## Translation notes
 
 Details where the port is not mechanical, recorded so they are checkable against the MATLAB.
+
+**Nothing reproduces bit-for-bit.** MATLAB's `threefry` streams and the `Substream` arithmetic in
+`nne_gen.m` have no NumPy equivalent, so results match distributionally only. `data.mat` was never
+shared, so `X` and `y` are a fresh draw regardless. Correctness is judged structurally — shapes, loss
+algebra, prior tail probabilities, GP covariance — and by whether the bias ordering across `M`
+reappears.
 
 **Architecture is DeepSets.** Input `[y, X]` is `n × 22` in MATLAB's `SCB` layout — S is the `n`
 observations, C the 22 channels, B the batch. `convolution1dLayer(1, k)` is therefore a
